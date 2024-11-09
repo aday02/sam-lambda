@@ -1,0 +1,11 @@
+# Ignore .aws-sam build directory
+.aws-sam/
+
+# Ignore node_modules
+node_modules/
+
+# Ignore log files
+*.log
+
+# Ignore AWS SAM build outputs
+*.template.json

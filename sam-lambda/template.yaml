@@ -1,0 +1,32 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  sam-lambda - This is my standard budget_id lambda controlled via AWS SAM. 
+Transform:
+- AWS::Serverless-2016-10-31
+
+# Resources declares the AWS resources that you want to include in the stack
+# https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/resources-section-structure.html
+Resources:
+  # Each Lambda function is defined by properties:
+  # https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+
+  # This is a Lambda function config associated with the source code: hello-from-lambda.js
+ sambudgetId:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: sam-budgetId  # This will ensure your Lambda function is always named "sam-budgetId"
+      Handler: src/handlers/samBudgetId.handler
+      Runtime: nodejs20.x
+      Architectures:
+      - x86_64
+      MemorySize: 128
+      Timeout: 100
+      Description: BudgetId Lambda function is designed to analyze transaction descriptions from bank statements and return corresponding budget categories. 
+      Policies:
+        # Give Lambda basic execution Permission to the helloFromLambda
+      - AWSLambdaBasicExecutionRole
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    LoggingConfig:
+      LogFormat: JSON
