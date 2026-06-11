@@ -79,14 +79,13 @@ export const handler = async (event) => {
       .map(row => ({ ...row, similarity: cosineSimilarity(queryVec, row.embedding) }))
       .sort((a, b) => b.similarity - a.similarity)[0];
 
+    const confident = topMatch.similarity >= AUTO_CATEGORIZE_THRESHOLD;
+
     return {
       statusCode: 200,
       body: JSON.stringify({
-        BudgetItem: topMatch.budgetItem,
-        BudgetDetail: topMatch.budgetDetail,
-        confidence: topMatch.similarity,
-        method: 'embedding_match',
-        ...(topMatch.similarity < AUTO_CATEGORIZE_THRESHOLD && { needsReview: true })
+        BudgetItem: confident ? topMatch.budgetItem : 'UNDEFINED',
+        BudgetDetail: confident ? topMatch.budgetDetail : 'UNDEFINED'
       })
     };
 
