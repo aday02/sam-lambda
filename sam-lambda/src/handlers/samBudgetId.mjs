@@ -4,7 +4,7 @@ import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedroc
 const dynamo = new DynamoDBClient({ region: 'us-west-2' });
 const bedrock = new BedrockRuntimeClient({ region: 'us-west-2' });
 
-const AUTO_CATEGORIZE_THRESHOLD = 0.90;
+const AUTO_CATEGORIZE_THRESHOLD = 0.70;
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
 let cachedIndex = null;
@@ -46,6 +46,7 @@ async function buildIndex() {
       ExclusiveStartKey: lastKey
     }));
     for (const item of data.Items) {
+      if (!item.BudgetItem || !item.BudgetDetail) continue;
       items.push({
         description: item.Description.S,
         budgetItem: item.BudgetItem.S,
