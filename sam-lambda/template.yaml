@@ -23,8 +23,12 @@ Resources:
       Timeout: 100
       Description: BudgetId Lambda function is designed to analyze transaction descriptions from bank statements and return corresponding budget categories. 
       Policies:
-        # Give Lambda basic execution Permission to the helloFromLambda
       - AWSLambdaBasicExecutionRole
+      - AmazonDynamoDBReadOnlyAccess
+      - Statement:
+          - Effect: Allow
+            Action: bedrock:InvokeModel
+            Resource: arn:aws:bedrock:us-west-2::foundation-model/amazon.titan-embed-text-v2:0
 # More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
 Globals:
   Function:
