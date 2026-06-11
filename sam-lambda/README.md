@@ -1,140 +1,184 @@
-# sam-lambda
+# sam-budgetId Lambda
 
-This project contains source code and supporting files for a serverless application that you can deploy with the AWS Serverless Application Model (AWS SAM) command line interface (CLI). It includes the following files and folders:
+A serverless AWS Lambda function that categorizes bank transaction descriptions into budget items using semantic similarity search powered by Amazon Bedrock Titan embeddings.
 
-- `src` - Code for the application's Lambda function.
-- `events` - Invocation events that you can use to invoke the function.
-- `__tests__` - Unit tests for the application code. 
-- `template.yaml` - A template that defines the application's AWS resources.
+## Overview
 
-Resources for this project are defined in the `template.yaml` file in this project. You can update the template to add AWS resources through the same deployment process that updates your application code.
+When given a transaction description (e.g. `TST* JAMBA JUICE - WOODBURN OR`), the function searches a DynamoDB table of previously categorized transactions using cosine similarity on 256-dimensional vector embeddings. It returns the best matching budget category or `UNDEFINED` if confidence is too low.
 
-If you prefer to use an integrated development environment (IDE) to build and test your application, you can use the AWS Toolkit.  
-The AWS Toolkit is an open-source plugin for popular IDEs that uses the AWS SAM CLI to build and deploy serverless applications on AWS. The AWS Toolkit also adds step-through debugging for Lambda function code. 
+This replaces a previous approach that matched only the first 8 characters of a description — which failed whenever merchant names varied slightly (different store numbers, payment processor prefixes like `SQ *`, `TST*`, `AMZN Mktp US*`, etc.).
 
-To get started, see the following:
+---
 
-* [CLion](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/welcome.html)
-* [GoLand](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/welcome.html)
-* [IntelliJ](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/welcome.html)
-* [WebStorm](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/welcome.html)
-* [Rider](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/welcome.html)
-* [PhpStorm](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/welcome.html)
-* [PyCharm](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/welcome.html)
-* [RubyMine](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/welcome.html)
-* [DataGrip](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/welcome.html)
-* [VS Code](https://docs.aws.amazon.com/toolkit-for-vscode/latest/userguide/welcome.html)
-* [Visual Studio](https://docs.aws.amazon.com/toolkit-for-visual-studio/latest/user-guide/welcome.html)
+## Project Structure
 
-## Deploy the sample application
+```
+src/
+  handlers/
+    samBudgetId.mjs       # Lambda handler
+  events/
+    event.json            # Test event: SENOR TACO
+    event-sq.json         # Test event: SQ *SENOR TACO
+    event-tst.json        # Test event: TST* SENOR TACO
+scripts/
+  backfillEmbeddings.mjs  # One-time: generate embeddings for existing DynamoDB items
+  importFromExcel.mjs     # One-time: load categorized transactions from Excel budget file
+  testLambda.mjs          # Integration test: invoke deployed Lambda with 20 test cases
+template.yaml             # SAM/CloudFormation resource definitions
+.samignore                # Excludes scripts/, node_modules/, src/events/ from SAM build
+```
 
-The AWS SAM CLI is an extension of the AWS CLI that adds functionality for building and testing Lambda applications. It uses Docker to run your functions in an Amazon Linux environment that matches Lambda. It can also emulate your application's build environment and API.
+---
 
-To use the AWS SAM CLI, you need the following tools:
+## DynamoDB Table
 
-* AWS SAM CLI - [Install the AWS SAM CLI](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/serverless-sam-cli-install.html).
-* Node.js - [Install Node.js 20](https://nodejs.org/en/), including the npm package management tool.
-* Docker - [Install Docker community edition](https://hub.docker.com/search/?type=edition&offering=community).
+**Table name:** `BudgetHistory`
+**Billing mode:** On-demand (PAY_PER_REQUEST)
+**Primary key:** `Description` (String, partition key)
 
-To build and deploy your application for the first time, run the following in your shell:
+### Schema
+
+| Attribute | Type | Description |
+|---|---|---|
+| `Description` | String | Transaction description as it appears on the bank statement |
+| `BudgetItem` | String | Top-level budget category (e.g. `Rest_Ent`, `Bills`, `Travel`) |
+| `BudgetDetail` | String | Sub-category detail (e.g. `Restaurant`, `Cable`, `Italy`) |
+| `embedding` | String | JSON array of 256 floats — Titan embedding of the Description |
+
+The table currently holds **~2,925 entries** sourced from historical bank transactions, each with a pre-computed embedding.
+
+---
+
+## How Embeddings Work
+
+On every invocation the Lambda:
+
+1. **Generates an embedding** for the incoming description by calling Amazon Bedrock (`amazon.titan-embed-text-v2:0`, 256 dimensions)
+2. **Loads the full DynamoDB index** into memory (cached for 5 minutes between warm invocations)
+3. **Computes cosine similarity** between the query embedding and every stored embedding
+4. **Returns the top match** if its similarity score is ≥ 0.70, otherwise returns `UNDEFINED`
+
+### Why 256 dimensions?
+
+Titan V2 supports 256, 512, or 1024 dimensions. 256 was chosen because:
+- Short transaction descriptions don't benefit meaningfully from higher dimensions
+- Each stored embedding takes ~4.7 KB vs ~18 KB at 1024 dims
+- Total table size stays under 15 MB, fast to scan and cache
+
+### Why 0.70 threshold?
+
+Stored descriptions include location suffixes (e.g. `SENOR TACO WEST LINN WEST LINN OR`) while incoming queries are typically shorter (e.g. `SENOR TACO`). This reduces cosine similarity to the 0.70–0.80 range for correct matches. Genuine mismatches score below 0.50.
+
+---
+
+## Lambda Input / Output
+
+**Input event:**
+```json
+{ "description": "TST* JAMBA JUICE - WOODBURN OR" }
+```
+
+**Response (match found):**
+```json
+{
+  "statusCode": 200,
+  "body": "{\"BudgetItem\":\"Rest_Ent\",\"BudgetDetail\":\"Restaurant\"}"
+}
+```
+
+**Response (low confidence):**
+```json
+{
+  "statusCode": 200,
+  "body": "{\"BudgetItem\":\"UNDEFINED\",\"BudgetDetail\":\"UNDEFINED\"}"
+}
+```
+
+---
+
+## Deployment
+
+### Prerequisites
+
+- [AWS SAM CLI](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/serverless-sam-cli-install.html)
+- [Node.js 20+](https://nodejs.org/)
+- AWS credentials configured locally
+
+### Build and deploy
 
 ```bash
 sam build
-sam deploy --guided
+sam deploy --no-confirm-changeset
 ```
 
-The first command will build the source of your application. The second command will package and deploy your application to AWS, with a series of prompts:
+> **Windows note:** If `sam build` fails with `[WinError 5] Access is denied`, delete the `.aws-sam` folder and retry. The `.samignore` file prevents the known problem folders from being copied into the build directory.
 
-* **Stack Name**: The name of the stack to deploy to CloudFormation. This should be unique to your account and region, and a good starting point would be something matching your project name.
-* **AWS Region**: The AWS region you want to deploy your app to.
-* **Confirm changes before deploy**: If set to yes, any change sets will be shown to you before execution for manual review. If set to no, the AWS SAM CLI will automatically deploy application changes.
-* **Allow SAM CLI IAM role creation**: Many AWS SAM templates, including this example, create AWS IAM roles required for the AWS Lambda function(s) included to access AWS services. By default, these are scoped down to minimum required permissions. To deploy an AWS CloudFormation stack which creates or modifies IAM roles, the `CAPABILITY_IAM` value for `capabilities` must be provided. If permission isn't provided through this prompt, to deploy this example you must explicitly pass `--capabilities CAPABILITY_IAM` to the `sam deploy` command.
-* **Save arguments to samconfig.toml**: If set to yes, your choices will be saved to a configuration file inside the project, so that in the future you can just re-run `sam deploy` without parameters to deploy changes to your application.
-
-## Use the AWS SAM CLI to build and test locally
-
-Build your application by using the `sam build` command.
+### View logs
 
 ```bash
-my-application$ sam build
+aws logs tail "/aws/lambda/sam-budgetId" --region us-west-2 --since 10m
 ```
 
-The AWS SAM CLI installs dependencies that are defined in `package.json`, creates a deployment package, and saves it in the `.aws-sam/build` folder.
+---
 
-Test a single function by invoking it directly with a test event. An event is a JSON document that represents the input that the function receives from the event source. Test events are included in the `events` folder in this project.
+## Scripts
 
-Run functions locally and invoke them with the `sam local invoke` command.
+All scripts are run from the project root (`sam-lambda/`) and require AWS credentials with DynamoDB and Bedrock access.
+
+### Install dependencies
 
 ```bash
-my-application$ sam local invoke helloFromLambdaFunction --no-event
+npm install
 ```
 
-## Add a resource to your application
+### `scripts/backfillEmbeddings.mjs`
 
-The application template uses AWS SAM to define application resources. AWS SAM is an extension of AWS CloudFormation with a simpler syntax for configuring common serverless application resources, such as functions, triggers, and APIs. For resources that aren't included in the [AWS SAM specification](https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md), you can use the standard [AWS CloudFormation resource types](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-template-resource-type-ref.html).
-
-Update `template.yaml` to add a dead-letter queue to your application. In the **Resources** section, add a resource named **MyQueue** with the type **AWS::SQS::Queue**. Then add a property to the **AWS::Serverless::Function** resource named **DeadLetterQueue** that targets the queue's Amazon Resource Name (ARN), and a policy that grants the function permission to access the queue.
-
-```
-Resources:
-  MyQueue:
-    Type: AWS::SQS::Queue
-  helloFromLambdaFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      Handler: src/handlers/hello-from-lambda.helloFromLambdaHandler
-      Runtime: nodejs20.x
-      DeadLetterQueue:
-        Type: SQS
-        TargetArn: !GetAtt MyQueue.Arn
-      Policies:
-        - SQSSendMessagePolicy:
-            QueueName: !GetAtt MyQueue.QueueName
-```
-
-The dead-letter queue is a location for Lambda to send events that could not be processed. It's only used if you invoke your function asynchronously, but it's useful here to show how you can modify your application's resources and function configuration.
-
-Deploy the updated application.
+Generates and stores Titan embeddings for any DynamoDB items that are missing them. Safe to re-run — skips items that already have an embedding.
 
 ```bash
-my-application$ sam deploy
+node scripts/backfillEmbeddings.mjs
 ```
 
-Open the [**Applications**](https://console.aws.amazon.com/lambda/home#/applications) page of the Lambda console, and choose your application. When the deployment completes, view the application resources on the **Overview** tab to see the new resource. Then, choose the function to see the updated configuration that specifies the dead-letter queue.
+### `scripts/importFromExcel.mjs`
 
-## Fetch, tail, and filter Lambda function logs
-
-To simplify troubleshooting, the AWS SAM CLI has a command called `sam logs`. `sam logs` lets you fetch logs that are generated by your Lambda function from the command line. In addition to printing the logs on the terminal, this command has several nifty features to help you quickly find the bug.
-
-**NOTE:** This command works for all Lambda functions, not just the ones you deploy using AWS SAM.
+Reads an Excel budget file, extracts unique categorized transaction descriptions, and loads new entries into DynamoDB with embeddings. For descriptions with conflicting categories across rows, the most frequently assigned category wins. Skips descriptions already in the table.
 
 ```bash
-my-application$ sam logs -n helloFromLambdaFunction --stack-name sam-app --tail
+node scripts/importFromExcel.mjs
 ```
 
-**NOTE:** This uses the logical name of the function within the stack. This is the correct name to use when searching logs inside an AWS Lambda function within a CloudFormation stack, even if the deployed function name varies due to CloudFormation's unique resource name generation.
+> Update the `EXCEL_PATH` constant at the top of the script to point to your budget file.
 
-You can find more information and examples about filtering Lambda function logs in the [AWS SAM CLI documentation](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/serverless-sam-cli-logging.html).
+### `scripts/testLambda.mjs`
 
-## Unit tests
-
-Tests are defined in the `__tests__` folder in this project. Use `npm` to install the [Jest test framework](https://jestjs.io/) and run unit tests.
+Invokes the **deployed** Lambda function with 20 representative test cases and compares the returned `BudgetItem`/`BudgetDetail` against expected values.
 
 ```bash
-my-application$ npm install
-my-application$ npm run test
+node scripts/testLambda.mjs
 ```
 
-## Cleanup
+Example output:
 
-To delete the sample application that you created, use the AWS CLI. Assuming you used your project name for the stack name, you can run the following:
+```
+Testing sam-budgetId Lambda
 
-```bash
-sam delete --stack-name sam-lambda
+Description                                   Expected                  Got                       Pass?
+----------------------------------------------------------------------------------------------------
+TST* JAMBA JUICE - 1256 -WOODBURN OR          Rest_Ent/Restaurant       Rest_Ent/Restaurant       ✓
+Comcast                                       Bills/Cable               Bills/Cable               ✓
+ALASKA AIR 0272380518241SEATTLE WA            Travel/N/A                Travel/N/A                ✓
+...
+Results: 20 passed, 0 wrong, 0 UNDEFINED out of 20
 ```
 
-## Resources
+---
 
-For an introduction to the AWS SAM specification, the AWS SAM CLI, and serverless application concepts, see the [AWS SAM Developer Guide](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/what-is-sam.html).
+## IAM Permissions
 
-Next, you can use the AWS Serverless Application Repository to deploy ready-to-use apps that go beyond Hello World samples and learn how authors developed their applications. For more information, see the [AWS Serverless Application Repository main page](https://aws.amazon.com/serverless/serverlessrepo/) and the [AWS Serverless Application Repository Developer Guide](https://docs.aws.amazon.com/serverlessrepo/latest/devguide/what-is-serverlessrepo.html).
+The Lambda execution role requires:
+
+| Permission | Purpose |
+|---|---|
+| `AWSLambdaBasicExecutionRole` | CloudWatch logging |
+| `AmazonDynamoDBReadOnlyAccess` | Scan the BudgetHistory table |
+| `bedrock:InvokeModel` on `amazon.titan-embed-text-v2:0` | Generate embeddings |
